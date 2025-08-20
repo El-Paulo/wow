@@ -23,10 +23,42 @@
   .kpi b{min-width:180px;display:inline-block}
   .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12.5px}
+   /* Modal de permisos */
+  .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:9999}
+  .modal{background:#0f1722;border:1px solid rgba(255,255,255,.1);border-radius:14px;max-width:680px;width:min(92%,680px);padding:16px}
+  .modal h3{margin:0 0 8px 0;font-size:18px}
+  .modal .steps{font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#0c1622;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px}
+  .modal .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <!-- MODAL: reactivar permisos -->
+<div id="permModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="permTitle">
+  <div class="modal">
+    <h3 id="permTitle">Permisos de cámara bloqueados</h3>
+    <p id="permReason" class="hint"></p>
+    <div class="steps">
+      <b>Cómo reactivarlos:</b>
+      <ul>
+        <li>🔒 Clic en el <b>candado</b> de la barra de direcciones.</li>
+        <li><b>Site settings → Camera → Allow</b>.</li>
+        <li>Recarga la página.</li>
+      </ul>
+      <b>Atajos:</b>
+      <ul>
+        <li><b>Chrome/Edge:</b> Candado → Site settings → Camera → Allow.</li>
+        <li><b>Firefox:</b> Candado → Permisos → Usar la cámara → Permitir.</li>
+        <li><b>iOS Safari/Chrome:</b> Ajustes del sistema → App → Cámara → Permitir.</li>
+      </ul>
+    </div>
+    <div class="row">
+      <button id="retryStart">🔁 Probar de nuevo</button>
+      <button id="closeModal">Cerrar</button>
+      <a id="httpsLink" style="margin-left:auto;text-decoration:underline;cursor:pointer">Abrir por HTTPS</a>
+    </div>
+  </div>
+</div>
   <h1>WOW Demos (FIX) • Manos, Cara, Pose, Sonido y 3D</h1>
   <div class="grid">
     <div class="card">
@@ -98,6 +130,23 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('overlay');
 const ctx = canvas.getContext('2d');
 const threeRoot = document.getElementById('three-root');
+  // modal elems
+const permModal = document.getElementById('permModal');
+const permReason = document.getElementById('permReason');
+const retryBtn   = document.getElementById('retryStart');
+const closeModalBtn = document.getElementById('closeModal');
+const httpsLink  = document.getElementById('httpsLink');
+
+function openPermModal(reason){ permReason.textContent = reason || ''; permModal.style.display = 'flex'; }
+function closePermModal(){ permModal.style.display = 'none'; }
+
+retryBtn?.addEventListener('click', ()=>{ closePermModal(); start(); });
+closeModalBtn?.addEventListener('click', closePermModal);
+httpsLink?.addEventListener('click', ()=>{
+  if(location.protocol!=='https:'){
+    location.href = 'https://' + location.host + location.pathname + location.search + location.hash;
+  }
+});
 const demoSel = document.getElementById('demo');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
@@ -120,8 +169,16 @@ sizeStage();
 async function ensureHandPoseGlobal(){
   if(window.handPoseDetection) return true;
   try{
-    // Fallback a versión min (algunos navegadores requieren archivo explícito)
+    // Intento 1: jsDelivr UMD
     await new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.2/dist/hand-pose-detection.min.js'; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+    if(window.handPoseDetection) return true;
+  }catch(e){ /* continua al fallback */ }
+  try{
+    // Intento 2: unpkg UMD
+    await new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://unpkg.com/@tensorflow-models/hand-pose-detection@2.0.2/dist/hand-pose-detection.min.js'; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+    return !!window.handPoseDetection;
+  }catch(e){ return false; }
+});
     return !!window.handPoseDetection;
   }catch(e){ return false; }
 }
@@ -189,8 +246,13 @@ async function start(){
     tick();
   }catch(e){
     console.error('cam error', e);
-    alert('No se pudo iniciar la cámara. '+explainCamError(e));
-    log(err('Cámara: '+explainCamError(e)));
+    const msg = explainCamError(e);
+    log(err('Cámara: '+ msg));
+    if(e.name==='NotAllowedError' || e.name==='SecurityError'){
+      openPermModal(msg);
+    } else {
+      alert('No se pudo iniciar la cámara. ' + msg);
+    }
   }
 }
 
@@ -212,10 +274,10 @@ async function bootModels(){
       {runtime:'mediapipe', solutionPath:MP_HANDS_PATH, modelType:'lite', maxHands:1}
     );
   }
-  if(!poseDetector && window.posedetection){
-    poseDetector = await posedetection.createDetector(
-      posedetection.SupportedModels.MoveNet,
-      {modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING}
+  if(!poseDetector && window.poseDetection){
+    poseDetector = await poseDetection.createDetector(
+      poseDetection.SupportedModels.MoveNet,
+      {modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING}
     );
   }
   if(!faceModel && window.faceLandmarksDetection){
@@ -367,7 +429,9 @@ runTestsBtn?.addEventListener('click', async ()=>{
   log((window.isSecureContext?ok:err)(`Contexto seguro: ${window.isSecureContext}`));
   log((navigator.mediaDevices?ok:err)(`mediaDevices disponible: ${!!navigator.mediaDevices}`));
   log((navigator.mediaDevices?.getUserMedia?ok:err)(`getUserMedia disponible: ${!!navigator.mediaDevices?.getUserMedia}`));
-  log((await ensureHandPoseGlobal()?ok:err)(`handPoseDetection cargado: ${!!window.handPoseDetection}`));
+  log(((await ensureHandPoseGlobal())?ok:err)(`handPoseDetection cargado: ${!!window.handPoseDetection}`));
+  log((window.poseDetection?ok:err)(`poseDetection cargado: ${!!window.poseDetection}`));
+  log((window.faceLandmarksDetection?ok:err)(`faceLandmarksDetection cargado: ${!!window.faceLandmarksDetection}`));
   log((()=>{ try{ const c=document.createElement('canvas'); const gl=c.getContext('webgl')||c.getContext('experimental-webgl'); return ok('WebGL OK'); }catch{ return err('WebGL no disponible'); } })());
   log(ok(`UserAgent: ${navigator.userAgent}`));
   await listCameras();
