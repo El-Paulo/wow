@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WOW Demos – FIX (Robusto + Diagnóstico)</title>
+<style>
+  :root{ --bg:#0b1117; --panel:#0f1722; --ink:#e6edf3; --muted:#9fb2c8; --ok:#22c55e; --warn:#eab308; --err:#ef4444; }
+  *{box-sizing:border-box}
+  body{margin:0;background:#0b1117;color:var(--ink);font:500 16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif}
+  .wrap{max-width:1200px;margin:0 auto;padding:20px}
+  .grid{display:grid;grid-template-columns:340px 1fr;gap:16px}
+  @media (max-width:1000px){.grid{grid-template-columns:1fr}}
+  .card,.panel{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px}
+  #stage{position:relative;min-height:460px;background:#0a131e;border-radius:16px;border:1px solid rgba(255,255,255,.08);overflow:hidden}
+  #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);opacity:.85}
+  canvas{position:absolute;inset:0}
+  button,select{background:#0d1a29;color:var(--ink);border:1px solid rgba(255,255,255,.14);padding:10px 12px;border-radius:12px;cursor:pointer}
+  button:hover{border-color:#4cc9f0}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .hint{opacity:.75;font-size:13px}
+  .kpi{display:flex;gap:10px;align-items:center;margin:6px 0}
+  .kpi b{min-width:180px;display:inline-block}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>WOW Demos (FIX) • Manos, Cara, Pose, Sonido y 3D</h1>
+  <div class="grid">
+    <div class="card">
+      <label for="demo">Demo</label>
+      <select id="demo">
+        <option value="hands">🎵 Theremín con la mano</option>
+        <option value="face">😎 FaceMesh AR (gafas)</option>
+        <option value="pose">🧍 Pose → cubo 3D</option>
+        <option value="magenta">🎹 Magenta: arpegiador IA</option>
+      </select>
+
+      <div style="height:10px"></div>
+      <div class="row">
+        <button id="start">Iniciar cámara</button>
+        <button id="stop" disabled>Detener</button>
+        <button id="audio" disabled>🔈 Activar audio</button>
+      </div>
+
+      <div style="margin-top:8px" class="row">
+        <label for="cameraSel" class="hint">Cámara:</label>
+        <select id="cameraSel" title="Selecciona cámara (si tienes varias)" style="min-width:260px"></select>
+      </div>
+
+      <p class="hint">Theremín: altura de la mano = tono, profundidad = volumen. Pinch (pulgar–índice) silencia.</p>
+
+      <hr style="opacity:.08;border:none;border-top:1px solid rgba(255,255,255,.08);margin:14px 0">
+      <details>
+        <summary>🧪 Diagnóstico y pruebas</summary>
+        <div id="diag" class="mono" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:10px">
+          <button id="runTests">Ejecutar pruebas</button>
+          <button id="clearDiag">Limpiar</button>
+        </div>
+        <p class="hint">Consejo: usa HTTPS o <code class="mono">http://localhost</code> para que la cámara funcione.</p>
+      </details>
+    </div>
+
+    <div class="panel">
+      <div id="stage">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div id="three-root" style="position:absolute;inset:0"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LIBRERÍAS (con fallback robusto) ===== -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.19.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@3.4.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@1.0.4"></script>
+<script>const MP_HANDS_PATH='https://cdn.jsdelivr.net/npm/@mediapipe/hands'; const MP_FACE_PATH='https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh';</script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@magenta/music@1.23.1/es6/core.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@magenta/music@1.23.1/es6/music_vae.js"></script>
+
+<script>
+// ========= utilidades =========
+const log = (html) => { const d=document.getElementById('diag'); d.innerHTML += html + '<br/>'; d.scrollTop=d.scrollHeight; };
+const ok = (m)=>`<span class="ok">✔</span> ${m}`;
+const warn=(m)=>`<span class="warn">⚠</span> ${m}`;
+const err = (m)=>`<span class="err">✖</span> ${m}`;
+
+// ====== setup base ======
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const threeRoot = document.getElementById('three-root');
+const demoSel = document.getElementById('demo');
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const audioBtn = document.getElementById('audio');
+const cameraSel = document.getElementById('cameraSel');
+
+let animId=null, stream=null, currentDemo='hands';
+let handDetector=null, poseDetector=null, faceModel=null;
+let synth=null, gain=null; // Tone.js
+let renderer, scene, camera3D, cube, controls; // three.js
+
+function sizeStage(){
+  const r = document.getElementById('stage').getBoundingClientRect();
+  canvas.width=r.width; canvas.height=Math.max(460, r.height);
+}
+new ResizeObserver(sizeStage).observe(document.getElementById('stage'));
+sizeStage();
+
+// ====== helpers ======
+async function ensureHandPoseGlobal(){
+  if(window.handPoseDetection) return true;
+  try{
+    // Fallback a versión min (algunos navegadores requieren archivo explícito)
+    await new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.2/dist/hand-pose-detection.min.js'; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+    return !!window.handPoseDetection;
+  }catch(e){ return false; }
+}
+
+async function listCameras(){
+  if(!navigator.mediaDevices?.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter(d=>d.kind==='videoinput');
+  cameraSel.innerHTML='';
+  cams.forEach((c,i)=>{
+    const opt=document.createElement('option');
+    opt.value=c.deviceId; opt.textContent=c.label||`Cámara ${i+1}`; cameraSel.appendChild(opt);
+  });
+}
+
+function explainCamError(e){
+  if(!e) return 'Error desconocido.';
+  switch(e.name){
+    case 'NotAllowedError': return 'Permiso denegado. Da clic en la barra del navegador para permitir la cámara.';
+    case 'NotFoundError': return 'No se encontró una cámara. Verifica que esté conectada y que otro programa no la esté usando.';
+    case 'NotReadableError': return 'La cámara está ocupada por otra app (Zoom/Meet). Ciérrala e inténtalo de nuevo.';
+    case 'OverconstrainedError': return `Las restricciones no se cumplen (constraint: ${e.constraint||'desconocida'}). Prueba otra cámara o quita resolución fija.`;
+    case 'SecurityError': return 'El contexto no es seguro. Usa HTTPS o http://localhost.';
+    default: return `${e.name||'Error'}: ${e.message||e.toString()}`;
+  }
+}
+
+// ====== eventos UI ======
+demoSel.addEventListener('change', ()=>{ currentDemo=demoSel.value; ctx.clearRect(0,0,canvas.width,canvas.height); teardownThree(); });
+
+startBtn.addEventListener('click', start);
+stopBtn.addEventListener('click', stop);
+audioBtn.addEventListener('click', async ()=>{
+  try{
+    await Tone.start();
+    if(!synth){
+      gain = new Tone.Gain(0.0).toDestination();
+      synth = new Tone.Synth({oscillator:{type:'sawtooth'}, envelope:{attack:0.01, decay:0.2, sustain:0.1, release:0.2}}).connect(gain);
+      synth._triggered=false;
+    }
+    audioBtn.textContent='🔊 Audio listo';
+    audioBtn.disabled=true;
+  }catch(e){ log(err('Audio: '+e.message)); }
+});
+
+// ====== flujo cámara ======
+async function start(){
+  try{
+    // requisitos previos
+    if(!(location.protocol==='https:'|| location.hostname==='localhost'|| location.hostname==='127.0.0.1')){
+      throw Object.assign(new Error('Contexto no seguro'), {name:'SecurityError'});
+    }
+    await ensureHandPoseGlobal();
+
+    // preferencia de cámara
+    const deviceId = cameraSel.value || undefined;
+    const constraints = { video: deviceId? {deviceId:{exact:deviceId}} : { facingMode:'user', width:{ideal:1280}, height:{ideal:720} }, audio:false };
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream; await video.play();
+    await listCameras(); // popular etiquetas con labels ya desbloqueados
+
+    stopBtn.disabled=false; startBtn.disabled=true; audioBtn.disabled=false;
+    await bootModels();
+    tick();
+  }catch(e){
+    console.error('cam error', e);
+    alert('No se pudo iniciar la cámara. '+explainCamError(e));
+    log(err('Cámara: '+explainCamError(e)));
+  }
+}
+
+async function stop(){
+  cancelAnimationFrame(animId);
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  stopBtn.disabled=true; startBtn.disabled=false; audioBtn.disabled=true;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  teardownThree();
+}
+
+async function bootModels(){
+  const [w,h] = [video.videoWidth, video.videoHeight];
+  if(w&&h){ canvas.width=w; canvas.height=h; }
+
+  if(!handDetector && window.handPoseDetection){
+    handDetector = await handPoseDetection.createDetector(
+      handPoseDetection.SupportedModels.MediaPipeHands,
+      {runtime:'mediapipe', solutionPath:MP_HANDS_PATH, modelType:'lite', maxHands:1}
+    );
+  }
+  if(!poseDetector && window.posedetection){
+    poseDetector = await posedetection.createDetector(
+      posedetection.SupportedModels.MoveNet,
+      {modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING}
+    );
+  }
+  if(!faceModel && window.faceLandmarksDetection){
+    faceModel = await faceLandmarksDetection.load(
+      faceLandmarksDetection.SupportedPackages.mediapipeFacemesh,
+      {maxFaces:1, shouldLoadIrisModel:false, runtime:'mediapipe', solutionPath:MP_FACE_PATH}
+    );
+  }
+}
+
+function tick(){
+  animId=requestAnimationFrame(tick);
+  if(!video.videoWidth) return;
+  ctx.save();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.translate(canvas.width,0); ctx.scale(-1,1); // espejo
+  if(currentDemo==='hands') drawHands();
+  else if(currentDemo==='pose') drawPose();
+  else if(currentDemo==='face') drawFace();
+  else if(currentDemo==='magenta') drawMagentaHint();
+  ctx.restore();
+}
+
+// ====== DEMO 1: Theremín ======
+async function drawHands(){
+  if(!handDetector) return;
+  const hands = await handDetector.estimateHands(video,{flipHorizontal:true});
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
+
+  if(hands.length){
+    const kp = hands[0].keypoints3D || [];
+    const k2 = hands[0].keypoints || [];
+    ctx.fillStyle='rgba(76,201,240,.4)';
+    k2.forEach(p=>{ ctx.beginPath(); ctx.arc(p.x,p.y,4,0,Math.PI*2); ctx.fill(); });
+
+    const palm = k2.find(p=>p.name==='wrist') || k2[0];
+    if(palm && synth){
+      const y = palm.y / canvas.height;          // 0 arriba, 1 abajo
+      const z = (kp[0]?.z ?? -0.05);             // ~[-0.2,0.2]
+      const midi = Math.round(40 + (1-y)*40);    // 40-80
+      const vol = Math.max(0, Math.min(1, 0.8 - (z+0.1)*2));
+      gain.gain.rampTo(vol, 0.05);
+      synth.frequency.rampTo(Tone.Frequency(midi,'midi'), 0.03);
+      if(!synth._triggered){
+        synth.triggerAttack(Tone.Frequency(midi,'midi'));
+        synth._triggered=true;
+      }
+    }
+
+    // Pinch para silenciar
+    if(k2.length){
+      const th=k2.find(p=>p.name==='thumb_tip');
+      const ix=k2.find(p=>p.name==='index_finger_tip');
+      if(th&&ix){
+        const d=Math.hypot(th.x-ix.x, th.y-ix.y);
+        if(d<25 && gain){ gain.gain.rampTo(0,0.05); }
+      }
+    }
+  } else {
+    // No mano → liberar nota
+    if(synth && synth._triggered){ synth.triggerRelease(); synth._triggered=false; }
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  }
+
+  // UI tip
+  ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fillRect(10,10,300,70);
+  ctx.fillStyle='#e6edf3'; ctx.font='14px system-ui';
+  ctx.fillText('Theremín con la mano',20,32);
+  ctx.fillText('Altura = tono • Profundidad = volumen • Pinch = mute',20,56);
+}
+
+// ====== DEMO 2: Pose → Cubo 3D ======
+async function drawPose(){
+  if(!poseDetector) return;
+  const poses = await poseDetector.estimatePoses(video,{flipHorizontal:true});
+  if(!renderer) initThree();
+  renderer.render(scene,camera3D);
+  if(poses.length){
+    const k=poses[0].keypoints;
+    const r=k.find(p=>p.name==='right_shoulder');
+    const l=k.find(p=>p.name==='left_shoulder');
+    if(r&&l&&r.score>0.3&&l.score>0.3){
+      const cx=(r.x+l.x)/2; const cy=(r.y+l.y)/2;
+      cube.position.x=(cx/canvas.width-0.5)*4;
+      cube.position.y=(cy/canvas.height-0.5)*-3;
+      cube.rotation.y+=0.02; cube.rotation.x+=0.015;
+    }
+  }
+  ctx.globalAlpha=.25; ctx.drawImage(video,0,0,canvas.width,canvas.height); ctx.globalAlpha=1;
+}
+
+function initThree(){
+  renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+  renderer.setSize(canvas.width,canvas.height); renderer.setPixelRatio(devicePixelRatio);
+  threeRoot.innerHTML=''; threeRoot.appendChild(renderer.domElement);
+  scene=new THREE.Scene();
+  camera3D=new THREE.PerspectiveCamera(45,canvas.width/canvas.height,0.1,100); camera3D.position.set(0,0,6);
+  const light=new THREE.DirectionalLight(0xffffff,1.2); light.position.set(1,1,2); scene.add(light);
+  scene.add(new THREE.AmbientLight(0xffffff,0.6));
+  cube=new THREE.Mesh(new THREE.BoxGeometry(1.2,1.2,1.2), new THREE.MeshStandardMaterial({metalness:.4,roughness:.2}));
+  scene.add(cube);
+  controls=new THREE.OrbitControls(camera3D,renderer.domElement); controls.enableDamping=true; controls.enablePan=false; controls.minDistance=3; controls.maxDistance=10;
+  new ResizeObserver(()=>{ const r=document.getElementById('stage').getBoundingClientRect(); renderer.setSize(r.width,Math.max(460,r.height)); camera3D.aspect=r.width/Math.max(460,r.height); camera3D.updateProjectionMatrix(); }).observe(document.getElementById('stage'));
+}
+
+function teardownThree(){ if(renderer){ renderer.dispose(); renderer.forceContextLoss?.(); } renderer=scene=camera3D=cube=controls=null; threeRoot.innerHTML=''; }
+
+// ====== DEMO 3: FaceMesh ======
+async function drawFace(){
+  if(!faceModel) return;
+  const faces = await faceModel.estimateFaces({input:video, flipHorizontal:true});
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  if(faces.length){
+    const p=faces[0].scaledMesh, L=p[70], R=p[300], C=p[168];
+    if(L&&R&&C){
+      const w=Math.hypot(L[0]-R[0], L[1]-R[1])*1.2, h=w*0.35; const ang=Math.atan2(L[1]-R[1], L[0]-R[0]);
+      ctx.save(); ctx.translate(C[0],C[1]); ctx.rotate(ang);
+      ctx.fillStyle='rgba(76,201,240,.25)'; ctx.strokeStyle='rgba(76,201,240,.8)'; ctx.lineWidth=4;
+      roundedRect(ctx,-w/2,-h/2,w*0.45,h,18); roundedRect(ctx,w/2-w*0.45,-h/2,w*0.45,h,18); ctx.stroke(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-w*0.05,0); ctx.lineTo(w*0.05,0); ctx.stroke(); ctx.restore();
+    }
+  }
+  ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fillRect(10,10,250,58); ctx.fillStyle='#e6edf3'; ctx.font='14px system-ui';
+  ctx.fillText('FaceMesh: gafas AR',20,32); ctx.fillText('Inclina la cabeza y mira el ajuste en tiempo real',20,54);
+}
+function roundedRect(c,x,y,w,h,r){ c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); }
+
+// ====== DEMO 4: Magenta ======
+let magentaPlayer=null, magentaVAE=null;
+function drawMagentaHint(){
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(10,10,360,94); ctx.fillStyle='#e6edf3'; ctx.font='14px system-ui';
+  ctx.fillText('Magenta: Genera un arpegio IA',20,32); ctx.fillText('1) Pulsa "Activar audio"  2) Clic para generar y reproducir',20,54); ctx.fillText('3) Cambia de demo cuando quieras',20,76);
+  canvas.onclick = async ()=>{ if(!synth){ await Tone.start(); gain=new Tone.Gain(0.8).toDestination(); synth=new Tone.PolySynth().connect(gain); } await playMagenta(); };
+}
+async function playMagenta(){
+  if(!magentaVAE){ magentaVAE = new mm.MusicVAE('https://storage.googleapis.com/magentadata/js/checkpoints/music_vae/multitrack_drums_lokl_small'); await magentaVAE.initialize(); }
+  const [seq] = await magentaVAE.sample(1);
+  if(!magentaPlayer){ magentaPlayer = new mm.Player(); }
+  magentaPlayer.resumeContext(); magentaPlayer.stop(); magentaPlayer.start(seq);
+}
+
+// ====== PRUEBAS (test cases) ======
+const runTestsBtn=document.getElementById('runTests');
+const clearDiagBtn=document.getElementById('clearDiag');
+runTestsBtn?.addEventListener('click', async ()=>{
+  document.getElementById('diag').innerHTML='';
+  log('<b>Pruebas rápidas</b>');
+  log((window.isSecureContext?ok:err)(`Contexto seguro: ${window.isSecureContext}`));
+  log((navigator.mediaDevices?ok:err)(`mediaDevices disponible: ${!!navigator.mediaDevices}`));
+  log((navigator.mediaDevices?.getUserMedia?ok:err)(`getUserMedia disponible: ${!!navigator.mediaDevices?.getUserMedia}`));
+  log((await ensureHandPoseGlobal()?ok:err)(`handPoseDetection cargado: ${!!window.handPoseDetection}`));
+  log((()=>{ try{ const c=document.createElement('canvas'); const gl=c.getContext('webgl')||c.getContext('experimental-webgl'); return ok('WebGL OK'); }catch{ return err('WebGL no disponible'); } })());
+  log(ok(`UserAgent: ${navigator.userAgent}`));
+  await listCameras();
+});
+clearDiagBtn?.addEventListener('click', ()=>{ document.getElementById('diag').innerHTML=''; });
+
+// Carga inicial de cámaras (puede venir sin labels hasta que se otorgue permiso)
+listCameras();
+
+window.addEventListener('beforeunload', ()=>{ if(synth && synth._triggered){ synth.triggerRelease(); } });
+</script>
+</body>
+</html>
